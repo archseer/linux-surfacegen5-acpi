@@ -614,9 +614,115 @@ static void sid_vhf_hid_close(struct hid_device *hid)
 	hid_dbg(hid, "%s\n", __func__);
 }
 
+struct surface_sam_sid_vhf_meta_rqst {
+	u8 id;
+	u32 offset;
+	u32 limit;
+	u8 end; // 0x01 if end was reached
+} __packed;
+
+struct vhf_meta_info_resp {
+	u8 _1;
+	u8 _2;
+	u8 _3;
+	u8 _4;
+	u8 _5;
+	u8 _6;
+	u8 _7;
+	u16 len;
+} __packed;
+
+union vhf_buffer_data {
+	struct vhf_meta_info_resp info;
+	u8 pld[0x76];
+};
+
+struct surface_sam_sid_vhf_meta_resp {
+	struct surface_sam_sid_vhf_meta_rqst rqst;
+	union vhf_buffer_data data;
+} __packed;
+
+
+static int vhf_get_hid_descriptor(struct hid_device *hid, u8 **desc, int *size)
+{
+	int status;
+	int len;
+	u8 *buf;
+
+	struct surface_sam_ssh_rqst rqst = {};
+	struct surface_sam_sid_vhf_meta_resp resp = {};
+	struct surface_sam_ssh_buf result = {};
+
+	resp.rqst.id = 0;
+	resp.rqst.offset = 0;
+	resp.rqst.limit = 0x76;
+	resp.rqst.end = 0;
+
+	rqst.tc = 0x15;
+	rqst.cid = 0x04;
+	rqst.iid = 0x03;
+	rqst.pri = 0x02;
+	rqst.snc = 0x01;
+	rqst.cdl = sizeof(struct surface_sam_sid_vhf_meta_rqst);
+	rqst.pld = (u8*)&resp.rqst;
+
+	result.cap  = sizeof(struct surface_sam_sid_vhf_meta_resp);
+	result.len  = 0;
+	result.data = (u8*)&resp;
+
+	// first fetch 01 to get the total length
+	status = surface_sam_ssh_rqst(&rqst, &result);
+	if (status) {
+		return status;
+	}
+
+	len = resp.data.info.len;
+
+	// allocate a buffer for the descriptor
+	buf = kzalloc(len * sizeof(u8), GFP_KERNEL);
+
+	// then, iterate and write into buffer, copying out resp.rqst.len bytes
+	// (it gets set to the length of data read)
+
+	resp.rqst.id = 1;
+	resp.rqst.offset = 0;
+	resp.rqst.end = 0;
+
+	while (resp.rqst.end != 0x01) {
+		status = surface_sam_ssh_rqst(&rqst, &result);
+		if (status) {
+			kfree(buf);
+			return status;
+		}
+		memcpy(buf + resp.rqst.offset, resp.data.pld, resp.rqst.limit);
+
+		resp.rqst.offset += resp.rqst.limit;
+	}
+
+	*desc = buf;
+	*size = len;
+
+	return 0;
+}
+
 static int sid_vhf_hid_parse(struct hid_device *hid)
 {
-	return hid_parse_report(hid, (u8 *)sid_vhf_hid_desc, ARRAY_SIZE(sid_vhf_hid_desc));
+
+	int ret = 0, size;
+	u8 *buf;
+
+	ret = vhf_get_hid_descriptor(hid, &buf, &size);
+	if (ret != 0) {
+		hid_dbg(hid, "vhf_get_hid_descriptor ret %d\n", ret);
+		return -EIO;
+	}
+	print_hex_dump_debug("descriptor:", DUMP_PREFIX_OFFSET, 16, 1, buf, size, false);
+
+	ret = hid_parse_report(hid, (u8 *)sid_vhf_hid_desc, ARRAY_SIZE(sid_vhf_hid_desc));
+	/* ret = hid_parse_report(hid, buf, size); */
+	kfree(buf);
+	return ret;
+
 }
 
 static int sid_vhf_hid_raw_request(struct hid_device *hid, unsigned char reportnum,
