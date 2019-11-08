@@ -12,6 +12,7 @@ extern struct platform_driver surface_sam_sid;
 extern struct platform_driver surface_sam_sid_gpelid;
 extern struct platform_driver surface_sam_sid_perfmode;
 extern struct platform_driver surface_sam_sid_vhf;
+extern struct platform_driver surface_sam_sid_psy;
 
 
 int __init surface_sam_init(void)
@@ -58,8 +59,15 @@ int __init surface_sam_init(void)
 		goto err_sid_vhf;
 	}
 
+	status = platform_driver_register(&surface_sam_sid_psy);
+	if (status) {
+		goto err_sid_psy;
+	}
+
 	return 0;
 
+err_sid_psy:
+	platform_driver_unregister(&surface_sam_sid_psy);
 err_sid_vhf:
 	platform_driver_unregister(&surface_sam_sid_vhf);
 err_sid_perfmode:
@@ -80,6 +88,7 @@ err_ssh:
 
 void __exit surface_sam_exit(void)
 {
+	platform_driver_unregister(&surface_sam_sid_psy);
 	platform_driver_unregister(&surface_sam_sid_perfmode);
 	platform_driver_unregister(&surface_sam_sid_vhf);
 	platform_driver_unregister(&surface_sam_sid_gpelid);
