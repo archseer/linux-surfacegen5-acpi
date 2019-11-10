@@ -311,16 +311,16 @@ static struct gsb_data_rqsx
 }
 
 static acpi_status
-san_etwl(struct san_opreg_context *ctx, struct gsb_buffer *buffer)
+san_etwl(struct device *dev, struct gsb_buffer *buffer)
 {
 	struct gsb_data_etwl *etwl = &buffer->data.etwl;
 
 	if (buffer->len < 3) {
-		dev_err(ctx->dev, "invalid ETWL package (len = %d)\n", buffer->len);
+		dev_err(dev, "invalid ETWL package (len = %d)\n", buffer->len);
 		return AE_OK;
 	}
 
-	dev_err(ctx->dev, "ETWL(0x%02x, 0x%02x): %.*s\n",
+	dev_err(dev, "ETWL(0x%02x, 0x%02x): %.*s\n",
 		etwl->etw3, etwl->etw4,
 		buffer->len - 3, (char *)etwl->msg);
 
@@ -332,9 +332,9 @@ san_etwl(struct san_opreg_context *ctx, struct gsb_buffer *buffer)
 }
 
 static acpi_status
-san_rqst(struct san_opreg_context *ctx, struct gsb_buffer *buffer)
+san_rqst(struct device *dev, struct gsb_buffer *buffer)
 {
-	struct gsb_data_rqsx *gsb_rqst = san_validate_rqsx(ctx->dev, "RQST", buffer);
+	struct gsb_data_rqsx *gsb_rqst = san_validate_rqsx(dev, "RQST", buffer);
 	struct surface_sam_ssh_rqst rqst = {};
 	struct surface_sam_ssh_buf result = {};
 	int status = 0;
@@ -362,7 +362,7 @@ san_rqst(struct san_opreg_context *ctx, struct gsb_buffer *buffer)
 
 	for (try = 0; try < SAN_RQST_RETRY; try++) {
 		if (try) {
-			dev_warn(ctx->dev, SAN_RQST_TAG "IO error occured, trying again\n");
+			dev_warn(dev, SAN_RQST_TAG "IO error occured, trying again\n");
 		}
 
 		status = surface_sam_ssh_rqst(&rqst, &result);
@@ -399,7 +399,7 @@ san_rqst(struct san_opreg_context *ctx, struct gsb_buffer *buffer)
 		memcpy(&buffer->data.out.pld[0], result.data, result.len);
 
 	} else {			// failure
-		dev_err(ctx->dev, SAN_RQST_TAG "failed with error %d\n", status);
+		dev_err(dev, SAN_RQST_TAG "failed with error %d\n", status);
 		buffer->status          = 0x00;
 		buffer->len             = 0x02;
 		buffer->data.out.status = 0x01;		// indicate _SSH error
@@ -412,9 +412,9 @@ san_rqst(struct san_opreg_context *ctx, struct gsb_buffer *buffer)
 }
 
 static acpi_status
-san_rqsg(struct san_opreg_context *ctx, struct gsb_buffer *buffer)
+san_rqsg(struct device *dev, struct gsb_buffer *buffer)
 {
-	struct gsb_data_rqsx *rqsg = san_validate_rqsx(ctx->dev, "RQSG", buffer);
+	struct gsb_data_rqsx *rqsg = san_validate_rqsx(dev, "RQSG", buffer);
 
 	if (!rqsg) {
 		return AE_OK;
@@ -422,7 +422,7 @@ san_rqsg(struct san_opreg_context *ctx, struct gsb_buffer *buffer)
 
 	// TODO: RQSG handler
 
-	dev_warn(ctx->dev, "unsupported request: RQSG(0x%02x, 0x%02x, 0x%02x)\n",
+	dev_warn(dev, "unsupported request: RQSG(0x%02x, 0x%02x, 0x%02x)\n",
 		 rqsg->tc, rqsg->cid, rqsg->iid);
 
 	return AE_OK;
@@ -455,9 +455,9 @@ san_opreg_handler(u32 function, acpi_physical_address command,
 	}
 
 	switch (buffer->data.in.cv) {
-	case 0x01:  return san_rqst(context, buffer);
-	case 0x02:  return san_etwl(context, buffer);
-	case 0x03:  return san_rqsg(context, buffer);
+	case 0x01:  return san_rqst(context->dev, buffer);
+	case 0x02:  return san_etwl(context->dev, buffer);
+	case 0x03:  return san_rqsg(context->dev, buffer);
 	}
 
 	dev_warn(context->dev, "unsupported SAN0 request (cv: 0x%02x)\n", buffer->data.in.cv);

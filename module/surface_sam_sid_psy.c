@@ -3,22 +3,13 @@
  * Translates the EC communication to a battery frontend.
  */
 
-// TODO: AC device
-
-/*
- * TODO:
- * - Make a battery device
- * - Subscribe it to the relevant events 
- * - Keep an updated state in memory
- * - power supply alarm / ALERT
- */
+// TODO: AC device (ADP1)
 
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 
 #include "surface_sam_ssh.h"
 
-#include <linux/async.h>
 #include <linux/delay.h>
 #include <linux/dmi.h>
 #include <linux/jiffies.h>
@@ -32,11 +23,10 @@
 #include <asm/unaligned.h>
 
 #include <linux/acpi.h>
+// actypes
 #include <linux/power_supply.h>
 
-#include <acpi/battery.h>
-
-#define PREFIX "ACPI: "
+#define PREFIX "surface_sam: "
 
 #define PSY_BATTERY_VALUE_UNKNOWN 0xFFFFFFFF
 
@@ -57,32 +47,16 @@ MODULE_AUTHOR("Blaž Hrastnik <blaz@mxxn.io>");
 MODULE_DESCRIPTION("Surface Gen7 Battery Driver");
 MODULE_LICENSE("GPL");
 
-static async_cookie_t async_cookie;
 static bool battery_driver_registered;
 static unsigned int cache_time = 1000;
 module_param(cache_time, uint, 0644);
 MODULE_PARM_DESC(cache_time, "cache time in milliseconds");
 
-static const struct acpi_device_id battery_device_ids[] = {
-	{"PNP0C0A", 0},
-	{"", 0},
-};
-
-MODULE_DEVICE_TABLE(acpi, battery_device_ids);
-
-enum {
-	PSY_BATTERY_QUIRK_PERCENTAGE_CAPACITY,
-	/* for batteries reporting current capacity with design capacity
-	 * on a full charge, but showing degradation in full charge cap.
-	 */
-	PSY_BATTERY_QUIRK_DEGRADED_FULL_CHARGE,
-};
-
 struct psy_battery {
 	struct mutex sysfs_lock;
 	struct power_supply *bat;
 	struct power_supply_desc bat_desc;
-	struct acpi_device *device;
+	struct platform_device *device;
 	struct notifier_block pm_nb;
 	unsigned long update_time;
 	int revision;
@@ -114,6 +88,9 @@ struct psy_battery {
 };
 
 #define to_psy_battery(x) power_supply_get_drvdata(x)
+
+// TODO: pass this through so we can have BAT0/BAT1
+#define psy_device_bid(device) "BAT0"
 
 static inline int psy_battery_present(struct psy_battery *battery)
 {
@@ -420,12 +397,27 @@ static int extract_package(struct psy_battery *battery,
 	return 0;
 }
 
+
 static int psy_battery_get_status(struct psy_battery *battery)
 {
-	if (acpi_bus_get_status(battery->device)) {
+	// _STA
+	struct gsb_buffer buffer = {
+		.data.rqsx = {
+			/* .cv = 0x01, // ? */
+			.tc = 0x02,
+			.tid = 0x01, // ?
+			.iid = 0x00, // TODO
+			.snc = 0x01,
+			.cid = 0x01,
+			.cdl = 0x00,
+		}
+	};
+
+	if (san_rqst(battery->device, &buffer)) {
 		ACPI_EXCEPTION((AE_INFO, AE_ERROR, "Evaluating _STA"));
 		return -ENODEV;
 	}
+
 	return 0;
 }
 
@@ -438,11 +430,6 @@ static int extract_battery_info(struct psy_battery *battery,
 	result = extract_package(battery, buffer->pointer,
 			extended_info_offsets,
 			ARRAY_SIZE(extended_info_offsets));
-	if (test_bit(PSY_BATTERY_QUIRK_PERCENTAGE_CAPACITY, &battery->flags))
-		battery->full_charge_capacity = battery->design_capacity;
-	if (test_bit(PSY_BATTERY_QUIRK_DEGRADED_FULL_CHARGE, &battery->flags) &&
-	    battery->capacity_now > battery->full_charge_capacity)
-		battery->capacity_now = battery->full_charge_capacity;
 
 	return result;
 }
@@ -511,14 +498,6 @@ static int psy_battery_get_state(struct psy_battery *battery)
 		battery->rate_now = abs((s16)battery->rate_now);
 		pr_warn_once(FW_BUG "battery: (dis)charge rate invalid.\n");
 	}
-
-	if (test_bit(PSY_BATTERY_QUIRK_PERCENTAGE_CAPACITY, &battery->flags)
-	    && battery->capacity_now >= 0 && battery->capacity_now <= 100)
-		battery->capacity_now = (battery->capacity_now *
-				battery->full_charge_capacity) / 100;
-	if (test_bit(PSY_BATTERY_QUIRK_DEGRADED_FULL_CHARGE, &battery->flags) &&
-	    battery->capacity_now > battery->full_charge_capacity)
-		battery->capacity_now = battery->full_charge_capacity;
 
 	return result;
 }
@@ -594,7 +573,7 @@ static int sysfs_add_battery(struct psy_battery *battery)
 			ARRAY_SIZE(energy_battery_props);
 	}
 
-	battery->bat_desc.name = acpi_device_bid(battery->device);
+	battery->bat_desc.name = psy_device_bid(battery->device);
 	battery->bat_desc.type = POWER_SUPPLY_TYPE_BATTERY;
 	battery->bat_desc.get_property = psy_battery_get_property;
 
@@ -623,42 +602,6 @@ static void sysfs_remove_battery(struct psy_battery *battery)
 	mutex_unlock(&battery->sysfs_lock);
 }
 
-/*
- * According to the ACPI spec, some kinds of primary batteries can
- * report percentage battery remaining capacity directly to OS.
- * In this case, it reports the Last Full Charged Capacity == 100
- * and BatteryPresentRate == 0xFFFFFFFF.
- *
- * Now we found some battery reports percentage remaining capacity
- * even if it's rechargeable.
- * https://bugzilla.kernel.org/show_bug.cgi?id=15979
- *
- * Handle this correctly so that they won't break userspace.
- */
-static void psy_battery_quirks(struct psy_battery *battery)
-{
-	if (test_bit(PSY_BATTERY_QUIRK_PERCENTAGE_CAPACITY, &battery->flags))
-		return;
-
-	if (battery->full_charge_capacity == 100 &&
-		battery->rate_now == PSY_BATTERY_VALUE_UNKNOWN &&
-		battery->capacity_now >= 0 && battery->capacity_now <= 100) {
-		set_bit(PSY_BATTERY_QUIRK_PERCENTAGE_CAPACITY, &battery->flags);
-		battery->full_charge_capacity = battery->design_capacity;
-		battery->capacity_now = (battery->capacity_now *
-				battery->full_charge_capacity) / 100;
-	}
-
-	if (test_bit(PSY_BATTERY_QUIRK_DEGRADED_FULL_CHARGE, &battery->flags))
-		return;
-
-	if (psy_battery_is_degraded(battery) &&
-	    battery->capacity_now > battery->full_charge_capacity) {
-		set_bit(PSY_BATTERY_QUIRK_DEGRADED_FULL_CHARGE, &battery->flags);
-		battery->capacity_now = battery->full_charge_capacity;
-	}
-}
-
 static int psy_battery_update(struct psy_battery *battery, bool resume)
 {
 	int result = psy_battery_get_status(battery);
@@ -685,7 +628,6 @@ static int psy_battery_update(struct psy_battery *battery, bool resume)
 	result = psy_battery_get_state(battery);
 	if (result)
 		return result;
-	psy_battery_quirks(battery);
 
 	if (!battery->bat) {
 		result = sysfs_add_battery(battery);
@@ -727,9 +669,76 @@ static void psy_battery_refresh(struct psy_battery *battery)
                                  Driver Interface
    -------------------------------------------------------------------------- */
 
-static void psy_battery_notify(struct acpi_device *device, u32 event)
+static unsigned long psy_evt_power_delay(struct surface_sam_ssh_event *event, void *data)
 {
-	struct psy_battery *battery = acpi_driver_data(device);
+	switch (event->cid) {
+	case SAM_EVENT_PWR_CID_CHARGING:
+	case SAM_EVENT_PWR_CID_STATE:
+		return SAM_EVENT_DELAY_PWR_STATE;
+
+	case SAM_EVENT_PWR_CID_ADAPTER:
+	case SAM_EVENT_PWR_CID_HWCHANGE:
+	default:
+		return 0;
+	}
+}
+
+static int psy_evt_power(struct surface_sam_ssh_event *event, void *data)
+{
+	struct device *dev = (struct device *)data;
+
+	switch (event->cid) {
+	case SAM_EVENT_PWR_CID_HWCHANGE:
+		enum san_pwr_event evcode;
+		int status;
+
+		if (event->iid == 0x02) {
+			evcode = SAN_PWR_EVENT_BAT2_INFO;
+		} else {
+			evcode = SAN_PWR_EVENT_BAT1_INFO;
+		}
+
+		status = san_acpi_notify_power_event(dev, evcode);
+		if (status) {
+			dev_err(dev, "error handling power event (cid = %x)\n", event->cid);
+			return status;
+		}
+
+	case SAM_EVENT_PWR_CID_ADAPTER:
+		int status;
+
+		status = san_acpi_notify_power_event(dev, SAN_PWR_EVENT_ADP1_STAT);
+		if (status) {
+			dev_err(dev, "error handling power event (cid = %x)\n", event->cid);
+			return status;
+		}
+
+	case SAM_EVENT_PWR_CID_CHARGING:
+	case SAM_EVENT_PWR_CID_STATE:
+		int status;
+
+		status = san_acpi_notify_power_event(dev, SAN_PWR_EVENT_BAT1_STAT);
+		if (status) {
+			dev_err(dev, "error handling power event (cid = %x)\n", event->cid);
+			return status;
+		}
+
+		status = san_acpi_notify_power_event(dev, SAN_PWR_EVENT_BAT2_STAT);
+		if (status) {
+			dev_err(dev, "error handling power event (cid = %x)\n", event->cid);
+			return status;
+		}
+
+	default:
+		dev_warn(dev, "unhandled power event (cid = %x)\n", event->cid);
+	}
+
+	return 0;
+}
+
+static void psy_battery_notify(struct platform_device *device, u32 event)
+{
+	struct psy_battery *battery = platform_driver_data(device);
 	struct power_supply *old;
 
 	if (!battery)
@@ -781,10 +790,44 @@ static int battery_notify(struct notifier_block *nb,
 	return 0;
 }
 
-static int psy_battery_add(struct acpi_device *device)
+static int psy_enable_events(struct device *dev)
+{
+	int status;
+
+	status = surface_sam_ssh_set_delayed_event_handler(
+			SAM_EVENT_PWR_RQID, psy_evt_power,
+			psy_evt_power_delay, dev);
+	if (status) {
+		goto err_handler_power;
+	}
+
+	status = surface_sam_ssh_enable_event_source(SAM_EVENT_PWR_TC, 0x01, SAM_EVENT_PWR_RQID);
+	if (status) {
+		goto err_source_power;
+	}
+
+	return 0;
+
+err_source_power:
+	surface_sam_ssh_remove_event_handler(SAM_EVENT_TEMP_RQID);
+err_handler_power:
+	return status;
+}
+
+static void psy_disable_events(void)
+{
+	surface_sam_ssh_disable_event_source(SAM_EVENT_PWR_TC, 0x01, SAM_EVENT_PWR_RQID);
+	surface_sam_ssh_remove_event_handler(SAM_EVENT_PWR_RQID);
+}
+
+static int psy_battery_probe(struct platform_device *device)
 {
 	int result = 0;
 	struct psy_battery *battery = NULL;
+
+	// TODO: load platform data and use that inside psy_device_bid
+	// TODO 2: this is probably the wrong approach and the psy should hold
+	// multiple battery devices that we mount, dunno?
 
 	if (!device)
 		return -EINVAL;
@@ -796,17 +839,21 @@ static int psy_battery_add(struct acpi_device *device)
 	if (!battery)
 		return -ENOMEM;
 	battery->device = device;
-	strcpy(acpi_device_name(device), PSY_BATTERY_DEVICE_NAME);
-	strcpy(acpi_device_class(device), PSY_BATTERY_CLASS);
+	strcpy(device->name, PSY_BATTERY_DEVICE_NAME);
 	device->driver_data = battery;
 	mutex_init(&battery->sysfs_lock);
+
+	status = psy_enable_events(&device->dev);
+	if (status) {
+		goto fail;
+	}
 
 	result = psy_battery_update(battery);
 	if (result)
 		goto fail;
 
 	pr_info(PREFIX "%s Slot [%s] (battery %s)\n",
-		PSY_BATTERY_DEVICE_NAME, acpi_device_bid(device),
+		PSY_BATTERY_DEVICE_NAME, psy_device_bid(device),
 		device->status.battery_present ? "present" : "absent");
 
 	battery->pm_nb.notifier_call = battery_notify;
@@ -823,14 +870,15 @@ fail:
 	return result;
 }
 
-static int psy_battery_remove(struct acpi_device *device)
+static int psy_battery_remove(struct platform_device *device)
 {
 	struct psy_battery *battery = NULL;
 
-	if (!device || !acpi_driver_data(device))
+	if (!device || !platform_driver_data(device))
 		return -EINVAL;
 	device_init_wakeup(&device->dev, 0);
-	battery = acpi_driver_data(device);
+	battery = platform_driver_data(device);
+	psy_disable_events();
 	unregister_pm_notifier(&battery->pm_nb);
 	sysfs_remove_battery(battery);
 	mutex_destroy(&battery->sysfs_lock);
@@ -847,7 +895,7 @@ static int psy_battery_resume(struct device *dev)
 	if (!dev)
 		return -EINVAL;
 
-	battery = acpi_driver_data(to_acpi_device(dev));
+	battery = platform_driver_data(to_platform_device(dev));
 	if (!battery)
 		return -EINVAL;
 
@@ -861,44 +909,11 @@ static int psy_battery_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(psy_battery_pm, NULL, psy_battery_resume);
 
-static struct acpi_driver psy_battery_driver = {
-	.name = "battery",
-	.class = PSY_BATTERY_CLASS,
-	.ids = battery_device_ids,
-	.flags = ACPI_DRIVER_ALL_NOTIFY_EVENTS,
-	.ops = {
-		.add = psy_battery_add,
-		.remove = psy_battery_remove,
-		.notify = psy_battery_notify,
-		},
-	.drv.pm = &psy_battery_pm,
+static struct platform_driver psy_battery_driver = {
+	.probe = psy_battery_probe,
+	.remove = psy_battery_remove,
+	.driver = {
+		.name = "surface_sam_sid_psy",
+		.pm = &psy_battery_pm,
+	},
 };
-
-static void __init psy_battery_init_async(void *unused, async_cookie_t cookie)
-{
-	unsigned int i;
-	int result;
-
-	result = acpi_bus_register_driver(&psy_battery_driver);
-	battery_driver_registered = (result == 0);
-}
-
-static int __init psy_battery_init(void)
-{
-	if (acpi_disabled)
-		return -ENODEV;
-
-	async_cookie = async_schedule(psy_battery_init_async, NULL);
-	return 0;
-}
-
-static void __exit psy_battery_exit(void)
-{
-	async_synchronize_cookie(async_cookie + 1);
-	if (battery_driver_registered) {
-		acpi_bus_unregister_driver(&psy_battery_driver);
-	}
-}
-
-module_init(psy_battery_init);
-module_exit(psy_battery_exit);
