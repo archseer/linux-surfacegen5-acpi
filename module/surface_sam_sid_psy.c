@@ -79,7 +79,6 @@ enum {
 };
 
 struct psy_battery {
-	struct mutex lock;
 	struct mutex sysfs_lock;
 	struct power_supply *bat;
 	struct power_supply_desc bat_desc;
@@ -459,10 +458,8 @@ static int psy_battery_get_info(struct psy_battery *battery)
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 	acpi_status status = AE_ERROR;
 
-	mutex_lock(&battery->lock);
 	status = acpi_evaluate_object(battery->device->handle, "_BIX",
 			NULL, &buffer);
-	mutex_unlock(&battery->lock);
 
 	if (ACPI_FAILURE(status)) {
 		ACPI_EXCEPTION((AE_INFO, status, "Evaluating %s",
@@ -491,10 +488,8 @@ static int psy_battery_get_state(struct psy_battery *battery)
 			msecs_to_jiffies(cache_time)))
 		return 0;
 
-	mutex_lock(&battery->lock);
 	status = acpi_evaluate_object(battery->device->handle, "_BST",
 				      NULL, &buffer);
-	mutex_unlock(&battery->lock);
 
 	if (ACPI_FAILURE(status)) {
 		ACPI_EXCEPTION((AE_INFO, status, "Evaluating _BST"));
@@ -535,10 +530,8 @@ static int psy_battery_set_alarm(struct psy_battery *battery)
 	if (!psy_battery_present(battery))
 		return -ENODEV;
 
-	mutex_lock(&battery->lock);
 	status = acpi_execute_simple_method(battery->device->handle, "_BTP",
 					    battery->alarm);
-	mutex_unlock(&battery->lock);
 
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
@@ -806,7 +799,6 @@ static int psy_battery_add(struct acpi_device *device)
 	strcpy(acpi_device_name(device), PSY_BATTERY_DEVICE_NAME);
 	strcpy(acpi_device_class(device), PSY_BATTERY_CLASS);
 	device->driver_data = battery;
-	mutex_init(&battery->lock);
 	mutex_init(&battery->sysfs_lock);
 
 	result = psy_battery_update(battery);
@@ -826,7 +818,6 @@ static int psy_battery_add(struct acpi_device *device)
 
 fail:
 	sysfs_remove_battery(battery);
-	mutex_destroy(&battery->lock);
 	mutex_destroy(&battery->sysfs_lock);
 	kfree(battery);
 	return result;
@@ -842,7 +833,6 @@ static int psy_battery_remove(struct acpi_device *device)
 	battery = acpi_driver_data(device);
 	unregister_pm_notifier(&battery->pm_nb);
 	sysfs_remove_battery(battery);
-	mutex_destroy(&battery->lock);
 	mutex_destroy(&battery->sysfs_lock);
 	kfree(battery);
 	return 0;
