@@ -7,6 +7,9 @@
 
 #include "surface_sam_ssh.h"
 
+// TODO: use netlink to send an event when alarms or certain events are
+// triggered
+
 
 /*
  * Common Power-Subsystem Interface.
@@ -939,6 +942,9 @@ static void sid_battery_notify(struct platform_device *device, u32 event)
 	if (event == SID_BATTERY_NOTIFY_INFO)
 		sid_battery_refresh(battery);
 	sid_battery_update(battery, false);
+	/* acpi_bus_generate_netlink_event(device->pnp.device_class, */
+	/* 				dev_name(&device->dev), event, */
+	/* 				spi_battery_present(battery)); */
 	/* sid_battery_update could remove power_supply object */
 	if (old && battery->bat)
 		power_supply_changed(battery->bat);
