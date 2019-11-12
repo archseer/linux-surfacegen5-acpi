@@ -373,6 +373,13 @@ struct sid_battery {
 // TODO: pass this through so we can have BAT0/BAT1
 #define psy_device_bid(device) "BAT0"
 
+
+static inline int sid_battery_present(struct sid_battery *battery)
+{
+	return battery->device->status.battery_present;
+}
+
+
 static int sid_battery_technology(struct sid_battery *battery)
 {
 	if (!strcasecmp("NiCd", battery->type))
@@ -440,8 +447,11 @@ static int sid_battery_get_property(struct power_supply *psy,
 	int ret = 0;
 	struct sid_battery *battery = to_sid_battery(psy);
 
-	sid_battery_get_state(battery);
-
+	if (sid_battery_present(battery)) {
+		/* run battery update only if it is present */
+		sid_battery_get_state(battery);
+	} else if (psp != POWER_SUPPLY_PROP_PRESENT)
+		return -ENODEV;
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
 		if (battery->state & SID_BATTERY_STATE_DISCHARGING)
@@ -454,7 +464,7 @@ static int sid_battery_get_property(struct power_supply *psy,
 			val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
 		break;
 	case POWER_SUPPLY_PROP_PRESENT:
-		val->intval = 1;
+		val->intval = sid_battery_present(battery);
 		break;
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
 		val->intval = sid_battery_technology(battery);
@@ -621,6 +631,9 @@ static int sid_battery_get_info(struct sid_battery *battery)
 	int status = 0;
 	struct sid_bix bix;
 
+	if (!sid_battery_present(battery))
+		return 0;
+
 	status = sam_psy_get_bix(battery->device->id, &bix);
 
 	if (status) {
@@ -658,6 +671,9 @@ static int sid_battery_get_state(struct sid_battery *battery)
 	int status = 0;
 	struct sid_bst bst;
 
+	if (!sid_battery_present(battery))
+		return 0;
+
 	if (battery->update_time &&
 	    time_before(jiffies, battery->update_time +
 			msecs_to_jiffies(cache_time)))
@@ -684,6 +700,9 @@ static int sid_battery_get_state(struct sid_battery *battery)
 static int sid_battery_set_alarm(struct sid_battery *battery)
 {
 	int status = 0;
+
+	if (!sid_battery_present(battery))
+		return -ENODEV;
 
 	status = sam_psy_set_btp(battery->device->id, battery->alarm);
 
@@ -720,7 +739,8 @@ static ssize_t sid_battery_alarm_store(struct device *dev,
 	struct sid_battery *battery = to_sid_battery(dev_get_drvdata(dev));
 	if (sscanf(buf, "%lu\n", &x) == 1)
 		battery->alarm = x/1000;
-	sid_battery_set_alarm(battery);
+	if (sid_battery_present(battery))
+		sid_battery_set_alarm(battery);
 	return count;
 }
 
@@ -779,6 +799,12 @@ static int sid_battery_update(struct sid_battery *battery, bool resume)
 
 	if (result)
 		return result;
+
+	if (!acpi_battery_present(battery)) {
+		sysfs_remove_battery(battery);
+		battery->update_time = 0;
+		return 0;
+	}
 
 	if (resume)
 		return 0;
@@ -913,6 +939,9 @@ static void sid_battery_notify(struct platform_device *device, u32 event)
 	if (event == SID_BATTERY_NOTIFY_INFO)
 		sid_battery_refresh(battery);
 	sid_battery_update(battery, false);
+	/* sid_battery_update could remove power_supply object */
+	if (old && battery->bat)
+		power_supply_changed(battery->bat);
 }
 
 static int battery_notify(struct notifier_block *nb,
@@ -925,6 +954,9 @@ static int battery_notify(struct notifier_block *nb,
 	switch (mode) {
 	case PM_POST_HIBERNATION:
 	case PM_POST_SUSPEND:
+		if (!sid_battery_present(battery))
+			return 0;
+
 		if (battery->bat) {
 			sid_battery_refresh(battery);
 		} else {
@@ -1004,7 +1036,7 @@ static int surface_sam_sid_battery_probe(struct platform_device *device)
 
 	dev_info(&pdev->dev, "%s Slot [%s] (battery %s)",
 		SID_BATTERY_DEVICE_NAME, psy_device_bid(device),
-		"present");
+		device->status.battery_present ? "present" : "absent");
 
 	battery->pm_nb.notifier_call = battery_notify;
 	register_pm_notifier(&battery->pm_nb);
