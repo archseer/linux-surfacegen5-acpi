@@ -11,8 +11,6 @@
 
 // TODO: (comm) error handling strategy
 // TODO: caching
-// TODO: eheck BIX/BST for unknown/unsupported 0xffffffff entries
-// TODO: alarm/_BTP
 // TODO: DPTF?
 // TODO: other properties?
 
@@ -46,6 +44,8 @@
 #define SAM_BATTERY_STATE_DISCHARGING	0x01
 #define SAM_BATTERY_STATE_CHARGING	0x02
 #define SAM_BATTERY_STATE_CRITICAL	0x04
+
+#define SAM_BATTERY_VALUE_UNKNOWN 0xFFFFFFFF
 
 /* Equivalent to data returned in ACPI _BIX method */
 struct spwr_bix {
@@ -709,31 +709,49 @@ static int spwr_battery_get_property(struct power_supply *psy,
 		break;
 
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
-		val->intval = bat->bix.design_voltage * 1000;
+		if (bat->bix.design_voltage == SAM_BATTERY_VALUE_UNKNOWN)
+			status = -ENODEV;
+		else
+			val->intval = bat->bix.design_voltage * 1000;
 		break;
 
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-		val->intval = bat->bst.present_voltage * 1000;
+		if (bat->bst.present_voltage == SAM_BATTERY_VALUE_UNKNOWN)
+			status = -ENODEV;
+		else
+			val->intval = bat->bst.present_voltage * 1000;
 		break;
 
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 	case POWER_SUPPLY_PROP_POWER_NOW:
-		val->intval = bat->bst.present_rate * 1000;
+		if (bat->bst.present_rate == SAM_BATTERY_VALUE_UNKNOWN)
+			status = -ENODEV;
+		else
+			val->intval = bat->bst.present_rate * 1000;
 		break;
 
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 	case POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN:
-		val->intval = bat->bix.design_cap * 1000;
+		if (bat->bix.design_cap == SAM_BATTERY_VALUE_UNKNOWN)
+			status = -ENODEV;
+		else
+			val->intval = bat->bix.design_cap * 1000;
 		break;
 
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 	case POWER_SUPPLY_PROP_ENERGY_FULL:
-		val->intval = bat->bix.last_full_charge_cap * 1000;
+		if (bat->bix.last_full_charge_cap == SAM_BATTERY_VALUE_UNKNOWN)
+			status = -ENODEV;
+		else
+			val->intval = bat->bix.last_full_charge_cap * 1000;
 		break;
 
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 	case POWER_SUPPLY_PROP_ENERGY_NOW:
-		val->intval = bat->bst.remaining_cap * 1000;
+		if (bat->bst.remaining_cap == SAM_BATTERY_VALUE_UNKNOWN)
+			status = -ENODEV;
+		else
+			val->intval = bat->bst.remaining_cap * 1000;
 		break;
 
 	case POWER_SUPPLY_PROP_CAPACITY:
