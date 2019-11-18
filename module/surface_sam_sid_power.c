@@ -10,7 +10,6 @@
 
 
 // TODO: (comm) error handling strategy
-// TODO: caching
 // TODO: DPTF?
 // TODO: other properties?
 
@@ -44,6 +43,9 @@
 #define SAM_BATTERY_STATE_DISCHARGING	0x01
 #define SAM_BATTERY_STATE_CHARGING	0x02
 #define SAM_BATTERY_STATE_CRITICAL	0x04
+
+/* Battery power unit: 0 means mW, 1 means mA */
+#define SAM_BATTERY_POWER_UNIT_MA	1
 
 #define SAM_BATTERY_VALUE_UNKNOWN 0xFFFFFFFF
 
@@ -287,16 +289,12 @@ struct spwr_battery_device {
 	struct power_supply *psy;
 	struct power_supply_desc psy_desc;
 
-	// TODO: caching
-
 	struct mutex lock;
 
 	u32 sta;
 	struct spwr_bix bix;
 	struct spwr_bst bst;
 	int alarm;
-
-	unsigned long flags;
 };
 
 struct spwr_ac_device {
@@ -394,6 +392,31 @@ inline static int spwr_battery_update_bst(struct spwr_battery_device *bat)
 inline static int spwr_ac_update(struct spwr_ac_device *ac)
 {
 	return sam_psy_get_psrc(0x00, &ac->state);
+}
+
+static int spwr_battery_init_alarm(struct spwr_battery_device *battery);
+
+static int spwr_battery_update(struct spwr_battery_device *bat)
+{
+	int status = 0;
+
+	status = spwr_battery_update_sta(bat);
+	if (status)
+		return status;
+
+	status = spwr_battery_update_bix(bat);
+	if (status)
+		return status;
+
+	status = spwr_battery_update_bst(bat);
+	if (status)
+		return status;
+
+	spwr_battery_init_alarm(bat);
+
+	power_supply_changed(bat->psy);
+
+	return status;
 }
 
 
@@ -670,20 +693,6 @@ static int spwr_battery_get_property(struct power_supply *psy,
 	int status;
 
 	mutex_lock(&bat->lock);
-
-	// TODO: caching
-
-	status = spwr_battery_update_sta(bat);
-	if (status)
-		goto out;
-
-	status = spwr_battery_update_bix(bat);
-	if (status)
-		goto out;
-
-	status = spwr_battery_update_bst(bat);
-	if (status)
-		goto out;
 
 	// abort if battery is not present
 	if (!spwr_battery_present(bat) && psp != POWER_SUPPLY_PROP_PRESENT) {
@@ -998,7 +1007,19 @@ static int spwr_battery_register(struct spwr_battery_device *bat, struct platfor
 	bat->psy_desc.name = bat->name;
 	bat->psy_desc.type = POWER_SUPPLY_TYPE_BATTERY;
 
+	// fetch initial values, set up alarms, etc.
+	status = spwr_battery_update(bat);
+	if (status)
+		return status;
+
 	// TODO: switch battery props based on units
+	if (bat->bix.power_unit == SAM_BATTERY_POWER_UNIT_MA) {
+		bat->psy_desc.properties = spwr_battery_props_chg;
+		bat->psy_desc.num_properties = ARRAY_SIZE(spwr_battery_props_chg);
+	} else {
+		bat->psy_desc.properties = spwr_battery_props_eng;
+		bat->psy_desc.num_properties = ARRAY_SIZE(spwr_battery_props_eng);
+	}
 	bat->psy_desc.properties = spwr_battery_props_eng;
 	bat->psy_desc.num_properties = ARRAY_SIZE(spwr_battery_props_eng);
 
